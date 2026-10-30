@@ -79,6 +79,8 @@ enum RemovalAction: String, CaseIterable, Identifiable {
 
 final class KeyMonitor: ObservableObject {
     @Published var armed = false // always starts unarmed
+    /// Set while a log out / shut down we triggered is in progress, so the system quitting us doesn't re-prompt.
+    var systemActionInFlight = false
     @Published private(set) var log: [LogEntry] = [] // newest first
     /// Times protection was tested. Kept on disk and only cleared with the admin password, so an intruder can't wipe them.
     @Published private(set) var incidents: [LogEntry] = UserDefaults.standard.data(forKey: "incidentLog")
@@ -128,8 +130,7 @@ final class KeyMonitor: ObservableObject {
         // Unlocking without a key just locks again, so the password alone isn't enough.
         DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
             guard let self, self.armed, !self.connected else { return }
-            lockScreen()
-            self.incident("Re-locked, no key")
+            self.incident(lockScreen() ? "Re-locked, no key" : "Re-lock failed")
         }
     }
 
@@ -263,9 +264,14 @@ final class KeyMonitor: ObservableObject {
 
     private func perform(_ action: RemovalAction) {
         switch action {
-        case .lock: lockScreen()
-        case .logOut: sendToLoginWindow("rlgo")   // kAEReallyLogOut
-        case .shutDown: sendToLoginWindow("shut") // kAEShutDown
+        case .lock:
+            if !lockScreen() { incident("Lock failed") }
+        case .logOut:
+            systemActionInFlight = true // the system will quit us; don't make it ask for the password again
+            if !sendToLoginWindow("rlgo") { systemActionInFlight = false; incident("Log out failed") } // kAEReallyLogOut
+        case .shutDown:
+            systemActionInFlight = true
+            if !sendToLoginWindow("shut") { systemActionInFlight = false; incident("Shut down failed") } // kAEShutDown
         }
     }
 }
@@ -392,11 +398,14 @@ func autoLoginEnabled() -> Bool {
     NSDictionary(contentsOfFile: "/Library/Preferences/com.apple.loginwindow.plist")?["autoLoginUser"] != nil
 }
 
-func lockScreen() {
-    let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_NOW)
-    guard let sym = dlsym(handle, "SACLockScreenImmediate") else { return }
+/// Locks the screen via a private login.framework symbol. Returns false when the symbol is missing or the call
+/// fails, so callers record it rather than claiming the Mac is locked.
+@discardableResult
+func lockScreen() -> Bool {
+    guard let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_NOW),
+          let sym = dlsym(handle, "SACLockScreenImmediate") else { return false }
     typealias Fn = @convention(c) () -> Int32
-    _ = unsafeBitCast(sym, to: Fn.self)()
+    return unsafeBitCast(sym, to: Fn.self)() == 0
 }
 
 /// Shows the standard macOS admin password prompt.
@@ -413,12 +422,13 @@ func adminAuthorized() -> Bool {
     }
 }
 
-func sendToLoginWindow(_ code: String) {
+@discardableResult
+func sendToLoginWindow(_ code: String) -> Bool {
     func fourCC(_ s: String) -> UInt32 { s.utf8.reduce(0) { $0 << 8 | UInt32($1) } }
     let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.loginwindow")
     let event = NSAppleEventDescriptor(eventClass: fourCC("aevt"), eventID: fourCC(code), targetDescriptor: target,
                                        returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
-    _ = try? event.sendEvent(options: [.noReply], timeout: 10)
+    do { try event.sendEvent(options: [.noReply], timeout: 10); return true } catch { return false }
 }
 
 @main
