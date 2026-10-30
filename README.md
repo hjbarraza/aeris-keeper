@@ -46,6 +46,17 @@ Insert the key, then unlock. Unlock first, and Keeper will treat you as an intru
 
 Everything else — responses, incidents, recovering a lost key — is in the [guide](docs/GUIDE.md).
 
+## Lost your key
+
+Keeper always starts disarmed, so a restart gets you back in.
+
+1. Restart the Mac. If it's locked, hold the power button until it turns off, then turn it on. Unsaved work is lost.
+2. Log in with your password as usual.
+3. Open Keeper, choose **Remove** next to the lost key, and confirm with the administrator password.
+4. Register a new key.
+
+Register a second key as a backup, and keep it somewhere safe. Any registered key is enough.
+
 ## Build
 
 ```sh
