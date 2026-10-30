@@ -14,7 +14,8 @@ inserted. An identical model will not pass.
 Arm Keeper. While a registered key is present, nothing happens. Remove it, and after 1.5 seconds the Mac locks,
 logs out, or shuts down — your choice. Unlock without the key and it locks again; the attempt is kept as an incident.
 
-Disarming, quitting while armed, changing keys and clearing incidents require the administrator password.
+Disarming, quitting while armed, changing keys and clearing incidents require the administrator password. Logging
+out, restarting and shutting down do not.
 
 <p align="center">
   <a href="https://youtu.be/xgAPX1K-7IA">
@@ -91,7 +92,10 @@ and always starts disarmed. Tested on macOS 27.
 
 - Locking uses a private macOS function.
 - Keys and incidents are stored in user preferences. The administrator password is enforced by Keeper, not by the system.
-- Log out and shut down can be stopped by apps with unsaved work. Lock cannot.
+- Log out and shut down can be stopped by apps with unsaved work. Keeper locks first, so the Mac stays locked if they are.
+- Force Quit ends Keeper without the password. Other `kill` signals ask for it.
+- A key that can only sign with a touch is recognized, not signature-checked, and is marked `*` in the panel. A
+  purpose-built fake could pass as one.
 
 ## Roadmap
 
@@ -99,14 +103,12 @@ and always starts disarmed. Tested on macOS 27.
 
 - Notarized build — opens with a double-click
 - Wrong passwords at the lock screen recorded as incidents
-- A logout or shut down that doesn't happen falls back to lock
 - Keeper restarts itself if force-quit while armed
 - A restart while armed is recorded as an incident
 
 **Later**
 
 - Keys and incidents in storage only an administrator can change
-- Signed challenges, so a key proves itself cryptographically
 - Optional: arm automatically when a registered key is inserted
 - Key nicknames · VoiceOver · incident export
 

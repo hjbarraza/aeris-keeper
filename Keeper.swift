@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import IOKit
 import ServiceManagement
 import IOKit.hid
@@ -14,6 +15,9 @@ struct RegisteredKey: Codable, Hashable, Identifiable {
     let name: String
     let handle: Data
     var added: Date? = nil
+    /// Credential public key (P-256, x9.63). Kept only for keys that proved at registration they can sign without a
+    /// touch; those must prove it every time. Nil means recognition only.
+    var publicKey: Data? = nil
     var id: Data { handle }
     var model: String { String(format: "%04X:%04X", vendor, product) }
     /// Tells identical models apart in the list.
@@ -59,12 +63,12 @@ enum RemovalAction: String, CaseIterable, Identifiable {
         }
     }
 
-    /// For the log: "Key removed, locked".
-    var past: String {
+    /// For the log: "Key removed, locked". Log out and shut down are only requests, so they don't claim to be done.
+    var status: String {
         switch self {
         case .lock: "locked"
-        case .logOut: "logged out"
-        case .shutDown: "halted"
+        case .logOut: "logging out"
+        case .shutDown: "shutting down"
         }
     }
 
@@ -78,7 +82,11 @@ enum RemovalAction: String, CaseIterable, Identifiable {
 }
 
 final class KeyMonitor: ObservableObject {
+    static let shared = KeyMonitor()
     @Published var armed = false // always starts unarmed
+    /// Set while a log out / shut down we asked for is underway, so it can't stall on our own password prompt.
+    /// Cleared if it hasn't happened after 30s, so a refused one doesn't leave quitting free.
+    var systemActionInFlight = false
     @Published private(set) var log: [LogEntry] = [] // newest first
     /// Times protection was tested. Kept on disk and only cleared with the admin password, so an intruder can't wipe them.
     @Published private(set) var incidents: [LogEntry] = UserDefaults.standard.data(forKey: "incidentLog")
@@ -88,7 +96,11 @@ final class KeyMonitor: ObservableObject {
     var awaitingTouch: Bool { touchDeadline != nil }
     @Published private(set) var registered: [RegisteredKey] = []
     @Published private var present: [UInt64: Device] = [:]
-    @AppStorage("action") var action = RemovalAction.lock.rawValue
+    /// On-key-loss choice. Backed by UserDefaults by hand: @AppStorage inside an ObservableObject doesn't emit
+    /// objectWillChange, so the panel's highlight went stale. didSet republishes and persists.
+    @Published var action = UserDefaults.standard.string(forKey: "action") ?? RemovalAction.lock.rawValue {
+        didSet { UserDefaults.standard.set(action, forKey: "action") }
+    }
 
     private var port: IONotificationPortRef?
     private var addedIter: io_iterator_t = 0
@@ -128,8 +140,7 @@ final class KeyMonitor: ObservableObject {
         // Unlocking without a key just locks again, so the password alone isn't enough.
         DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
             guard let self, self.armed, !self.connected else { return }
-            lockScreen()
-            self.incident("Re-locked, no key")
+            self.incident(lockScreen() ? "Re-locked, no key" : "Re-lock failed")
         }
     }
 
@@ -140,25 +151,24 @@ final class KeyMonitor: ObservableObject {
         note(on ? "Armed" : "Disarmed")
     }
 
-    /// Quitting while armed would drop the protection, so it needs the admin password too.
-    func quit() {
-        guard !armed || adminAuthorized() else { return }
-        NSApp.terminate(nil)
-    }
+    /// Quitting while armed would drop the protection, so it needs the admin password. The check itself lives in
+    /// AppDelegate.applicationShouldTerminate, so every termination path is gated, not just this button.
+    func quit() { NSApp.terminate(nil) }
 
     func register(_ device: Device) {
         guard adminAuthorized() else { return }
         registrationError = nil
         touchDeadline = Date().addingTimeInterval(30) // matches U2FDevice.register's wait
         u2fQueue.async {
-            let handle = U2FDevice.session(device.hid) { $0.register() }
+            let credential = U2FDevice.session(device.hid) { $0.register() }
             DispatchQueue.main.async {
                 self.touchDeadline = nil
-                guard let handle else { self.registrationError = "Registration failed, try again"; return }
-                self.registered.append(RegisteredKey(vendor: device.vendor, product: device.product, name: device.name, handle: handle, added: Date()))
+                guard let credential else { self.registrationError = "Registration failed, try again"; return }
+                self.registered.append(RegisteredKey(vendor: device.vendor, product: device.product, name: device.name,
+                                                    handle: credential.handle, added: Date(), publicKey: credential.publicKey))
                 self.note("Key registered")
                 self.save()
-                self.present[device.id]?.owner = handle
+                self.present[device.id]?.owner = credential.handle
                 self.update()
             }
         }
@@ -170,7 +180,10 @@ final class KeyMonitor: ObservableObject {
         save()
         note("Key unregistered")
         for (id, device) in present where device.owner == key.handle { present[id]?.owner = nil }
-        if !connected { armed = false } // otherwise the next unlock would re-lock with no way to satisfy it
+        if !connected, armed {
+            armed = false // otherwise the next unlock would re-lock with no way to satisfy it
+            note("Disarmed, key unregistered")
+        }
         update()
     }
 
@@ -182,7 +195,7 @@ final class KeyMonitor: ObservableObject {
     private func verify(_ device: Device) {
         let candidates = registered.filter { $0.vendor == device.vendor && $0.product == device.product }
         u2fQueue.async {
-            let owner = candidates.isEmpty ? nil : U2FDevice.session(device.hid) { u2f in candidates.first { u2f.owns($0.handle) }?.handle }
+            let owner = candidates.isEmpty ? nil : U2FDevice.session(device.hid) { u2f in candidates.first { u2f.owns($0) }?.handle }
             DispatchQueue.main.async {
                 guard self.present[device.id] != nil else { return }
                 self.present[device.id]?.checked = true
@@ -233,9 +246,7 @@ final class KeyMonitor: ObservableObject {
             guard let self, !self.connected else { return }
             self.pendingLoss = nil
             guard self.armed else { self.note("Key removed"); return }
-            let response = RemovalAction(rawValue: self.action) ?? .lock
-            self.note("Key removed, " + response.past)
-            self.perform(response)
+            self.perform(RemovalAction(rawValue: self.action) ?? .lock)
         }
         pendingLoss = loss
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: loss)
@@ -261,11 +272,26 @@ final class KeyMonitor: ObservableObject {
         log = Array(([LogEntry(date: Date(), text: event)] + log).prefix(5))
     }
 
+    /// Locks first whatever the choice: log out and shut down can be refused, and the Mac mustn't be left open if they are.
     private func perform(_ action: RemovalAction) {
+        let locked = lockScreen()
+        if !locked { incident("Lock failed") }
+        note("Key removed, " + (locked ? action.status : "lock failed"))
         switch action {
-        case .lock: lockScreen()
-        case .logOut: sendToLoginWindow("rlgo")   // kAEReallyLogOut
-        case .shutDown: sendToLoginWindow("shut") // kAEShutDown
+        case .lock: break
+        case .logOut: endSession("rlgo", failure: "Log out failed") // kAEReallyLogOut
+        case .shutDown: endSession("shut", failure: "Shut down failed") // kAEShutDown
+        }
+    }
+
+    /// Asks loginwindow to end the session. An app with unsaved work can refuse after the request has gone out, so
+    /// still being here 30s later is what says it failed.
+    private func endSession(_ code: String, failure: String) {
+        systemActionInFlight = true
+        guard sendToLoginWindow(code) else { systemActionInFlight = false; incident(failure); return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            self?.systemActionInFlight = false
+            self?.incident(failure)
         }
     }
 }
@@ -302,11 +328,12 @@ final class U2FDevice {
         return u2f.openChannel() ? body(u2f) : nil
     }
 
-    /// Creates a credential and returns its key handle once the key has been touched (up to 30s).
-    func register() -> Data? {
+    /// Creates a credential once the key has been touched (up to 30s). Returns the handle, plus the public key when the
+    /// key can sign without a touch, so later checks can be cryptographic rather than a bare "I know this handle".
+    func register() -> (handle: Data, publicKey: Data?)? {
         let challenge = (0..<32).map { _ in UInt8.random(in: 0...255) }
         let deadline = Date().addingTimeInterval(30)
-        let registerCommand = { self.apdu(0x01, 0x00, challenge + self.appID) }
+        let registerCommand = { self.apdu(0x01, 0x00, challenge + self.appID, until: deadline) }
         var response = registerCommand()
         let touched = response.sw == 0x6985 // most keys wait for a touch here
         while response.sw == 0x6985 && Date() < deadline {
@@ -315,25 +342,60 @@ final class U2FDevice {
         }
         // Response: 0x05 | public key (65) | handle length | handle | ...
         guard response.sw == 0x9000, response.data.count > 67 else { return nil }
+        let publicKey = Data(response.data[1..<66])
         let length = Int(response.data[66])
         guard response.data.count >= 67 + length else { return nil }
         let handle = Data(response.data[67..<(67 + length)])
 
         // Some keys (the Feitian ePass) register without a touch but always want one to sign, so make them sign once.
-        guard !touched else { return handle }
-        let signCommand = { self.apdu(0x02, 0x03, challenge + self.appID + [UInt8(length)] + [UInt8](handle)) }
-        var signed = signCommand()
-        while signed.sw == 0x6985 && Date() < deadline {
-            CFRunLoopRunInMode(.defaultMode, 0.3, true)
-            signed = signCommand()
+        if !touched {
+            let signCommand = { self.apdu(0x02, 0x03, challenge + self.appID + [UInt8(length)] + [UInt8](handle), until: deadline) }
+            var signed = signCommand()
+            while signed.sw == 0x6985 && Date() < deadline {
+                CFRunLoopRunInMode(.defaultMode, 0.3, true)
+                signed = signCommand()
+            }
+            guard signed.sw == 0x9000, verifies(signed.data, challenge, publicKey) else { return nil }
         }
-        return signed.sw == 0x9000 ? handle : nil
+
+        switch silentProof([UInt8](handle), publicKey) {
+        case true?: return (handle, publicKey)
+        case nil: return (handle, nil) // only ever signs with a touch, so recognition is all there is
+        case false?: return nil // signed, but not with the key it just registered
+        }
     }
 
-    /// Check-only authenticate: the key answers 0x6985 only for handles it created itself.
-    func owns(_ handle: Data) -> Bool {
-        let challenge = [UInt8](repeating: 0, count: 32)
-        return apdu(0x02, 0x07, challenge + appID + [UInt8(handle.count)] + [UInt8](handle)).sw == 0x6985
+    /// Does this physical key hold `key`? Recognition is a check-only authenticate: a key answers 0x6985 (touch
+    /// required) only for a handle it created, and an error for a foreign one. A key with a stored public key must
+    /// also sign a fresh challenge: it proved it can, so a refusal now means this isn't that key.
+    func owns(_ key: RegisteredKey) -> Bool {
+        let handle = [UInt8](key.handle)
+        let body = [UInt8](repeating: 0, count: 32) + appID + [UInt8(handle.count)] + handle
+        guard apdu(0x02, 0x07, body).sw == 0x6985 else { return false }
+        guard let publicKey = key.publicKey else { return true }
+        return silentProof(handle, publicKey) == true
+    }
+
+    /// Asks for a signature over a fresh challenge without a touch (0x08). Nil if the key didn't sign, otherwise whether
+    /// the signature checks out. Retries a dropped exchange: a browser using the key at the same moment makes it busy.
+    private func silentProof(_ handle: [UInt8], _ publicKey: Data) -> Bool? {
+        let challenge = (0..<32).map { _ in UInt8.random(in: 0...255) }
+        let body = challenge + appID + [UInt8(handle.count)] + handle
+        var reply = apdu(0x02, 0x08, body)
+        for _ in 0..<2 where reply.sw == 0 {
+            CFRunLoopRunInMode(.defaultMode, 0.3, true)
+            reply = apdu(0x02, 0x08, body)
+        }
+        return reply.sw == 0x9000 ? verifies(reply.data, challenge, publicKey) : nil
+    }
+
+    /// Checks an authentication response: presence (1) | counter (4) | DER signature, made over
+    /// appID | presence | counter | challenge. Presence is signed as sent: it's 0 when no touch was asked for.
+    private func verifies(_ response: [UInt8], _ challenge: [UInt8], _ publicKey: Data) -> Bool {
+        guard response.count > 5,
+              let key = try? P256.Signing.PublicKey(x963Representation: publicKey),
+              let signature = try? P256.Signing.ECDSASignature(derRepresentation: Data(response[5...])) else { return false }
+        return key.isValidSignature(signature, for: Data(appID + Array(response[0..<5]) + challenge))
     }
 
     private func openChannel() -> Bool {
@@ -344,9 +406,17 @@ final class U2FDevice {
         return true
     }
 
-    private func apdu(_ ins: UInt8, _ p1: UInt8, _ body: [UInt8]) -> (sw: UInt16, data: [UInt8]) {
+    private func apdu(_ ins: UInt8, _ p1: UInt8, _ body: [UInt8], until deadline: Date = Date().addingTimeInterval(3)) -> (sw: UInt16, data: [UInt8]) {
+        inbox.removeAll() // a late answer to an earlier exchange isn't an answer to this one
         send(0x83, [0x00, ins, p1, 0x00, 0x00, UInt8(body.count >> 8), UInt8(body.count & 0xFF)] + body + [0x00, 0x00])
-        guard let reply = receive(), reply.data.count >= 2 else { return (0, []) }
+        // Ignore anything that isn't a MSG reply: keys send CTAPHID KEEPALIVE (0xBB) while they wait for a touch,
+        // and treating that 1-byte packet as the answer made the touch loop bail out and registration fail.
+        // Keepalives can't extend the wait past `deadline`, or a device could hold the U2F queue forever.
+        var reply: (cmd: UInt8, data: [UInt8])?
+        while Date() < deadline, let next = receive(), next.cmd != 0xBF { // 0xBF = CTAPHID ERROR, no answer is coming
+            if next.cmd == 0x83, next.data.count >= 2 { reply = next; break }
+        }
+        guard let reply else { return (0, []) }
         let sw = UInt16(reply.data[reply.data.count - 2]) << 8 | UInt16(reply.data[reply.data.count - 1])
         return (sw, Array(reply.data.dropLast(2)))
     }
@@ -369,13 +439,20 @@ final class U2FDevice {
     private func receive() -> (cmd: UInt8, data: [UInt8])? {
         let deadline = Date().addingTimeInterval(3)
         func next() -> [UInt8]? {
-            while inbox.isEmpty && Date() < deadline { CFRunLoopRunInMode(.defaultMode, 0.05, true) }
-            return inbox.isEmpty ? nil : inbox.removeFirst()
+            while Date() < deadline {
+                if inbox.isEmpty { CFRunLoopRunInMode(.defaultMode, 0.05, true); continue }
+                let report = inbox.removeFirst()
+                if report.starts(with: channel) { return report } // other apps' traffic on this key reaches us too
+            }
+            return nil
         }
         guard let first = next(), first.count >= 7 else { return nil }
         let total = Int(first[5]) << 8 | Int(first[6])
         var data = Array(first[7...].prefix(total))
-        while data.count < total, let more = next() { data += more[5...].prefix(total - data.count) }
+        while data.count < total, let more = next() {
+            guard more.count >= 5 else { continue } // a short report would trap on more[5...] below
+            data += more[5...].prefix(total - data.count)
+        }
         return (first[4], data)
     }
 }
@@ -385,11 +462,13 @@ func autoLoginEnabled() -> Bool {
     NSDictionary(contentsOfFile: "/Library/Preferences/com.apple.loginwindow.plist")?["autoLoginUser"] != nil
 }
 
-func lockScreen() {
-    let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_NOW)
-    guard let sym = dlsym(handle, "SACLockScreenImmediate") else { return }
+/// Locks the screen via a private login.framework symbol. Returns false when the symbol is missing or the call
+/// fails, so callers record it rather than claiming the Mac is locked.
+func lockScreen() -> Bool {
+    guard let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_NOW),
+          let sym = dlsym(handle, "SACLockScreenImmediate") else { return false }
     typealias Fn = @convention(c) () -> Int32
-    _ = unsafeBitCast(sym, to: Fn.self)()
+    return unsafeBitCast(sym, to: Fn.self)() == 0
 }
 
 /// Shows the standard macOS admin password prompt.
@@ -406,17 +485,66 @@ func adminAuthorized() -> Bool {
     }
 }
 
-func sendToLoginWindow(_ code: String) {
-    func fourCC(_ s: String) -> UInt32 { s.utf8.reduce(0) { $0 << 8 | UInt32($1) } }
+func fourCC(_ s: String) -> UInt32 { s.utf8.reduce(0) { $0 << 8 | UInt32($1) } }
+
+/// True once the request is sent, which is not the same as it being carried out.
+func sendToLoginWindow(_ code: String) -> Bool {
     let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.loginwindow")
     let event = NSAppleEventDescriptor(eventClass: fourCC("aevt"), eventID: fourCC(code), targetDescriptor: target,
                                        returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
-    _ = try? event.sendEvent(options: [.noReply], timeout: 10)
+    do { try event.sendEvent(options: [.noReply], timeout: 10); return true } catch { return false }
+}
+
+/// Gates the ways Keeper gets asked to quit. The panel button, ⌘Q, the Quit AppleEvent and catchable signals (so
+/// `kill` and `killall`) all reach applicationShouldTerminate, so the admin password is required however the quit
+/// started. Force Quit (SIGKILL) can't be caught and still bypasses it — see ROADMAP.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var signalSources: [DispatchSourceSignal] = []
+    private var authorizing = false
+    private var quitApproved = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Left alone, these end the process without ever reaching applicationShouldTerminate.
+        signalSources = [SIGTERM, SIGHUP, SIGINT, SIGQUIT].map { number in
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { NSApp.terminate(nil) }
+            source.resume()
+            return source
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let monitor = KeyMonitor.shared
+        guard monitor.armed, !monitor.systemActionInFlight, !sessionEnding, !quitApproved else { return .terminateNow }
+        // Always refuse this quit and start a new one if the password is right. Not .terminateLater: that holds the app
+        // in a modal state, where a second quit ends it unasked and a quit from a dispatch block never gets its answer.
+        guard !authorizing else { return .terminateCancel }
+        authorizing = true
+        // Off the main thread: the call blocks while the prompt is open, and Keeper has to keep watching the key.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let allowed = adminAuthorized()
+            DispatchQueue.main.async {
+                self.authorizing = false
+                self.quitApproved = allowed
+                if allowed { NSApp.terminate(nil) }
+            }
+        }
+        return .terminateCancel
+    }
+
+    /// Is this quit part of a log out, restart or shut down? Those aren't attempts to drop the protection, and a password
+    /// prompt would hold them up. A process could forge the reason, but it could just as well send SIGKILL.
+    private var sessionEnding: Bool {
+        let reason = NSAppleEventManager.shared().currentAppleEvent?.attributeDescriptor(forKeyword: fourCC("why?"))?.enumCodeValue
+        return ["logo", "rlgo", "rrst", "rest", "rsdn", "shut"].map(fourCC).contains { $0 == reason }
+    }
 }
 
 @main
 struct KeeperApp: App {
-    @StateObject private var monitor = KeyMonitor()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var monitor = KeyMonitor.shared
 
     var body: some Scene {
         MenuBarExtra {
@@ -448,8 +576,9 @@ func keeperIcon(_ glyph: Glyph) -> Image {
         let radius = armed ? 8.3 : 7.6 // the outline's stroke adds 0.7 outside, so the solid one grows to match
         let hexagon = NSBezierPath()
         for i in 0..<6 {
-            let angle = CGFloat.pi / 2 + CGFloat(i) * .pi / 3 // pointy top, like SF Symbols' hexagon
-            let point = NSPoint(x: 9 + radius * cos(angle), y: 9 + radius * sin(angle))
+            let angle = Double.pi / 2 + Double(i) * .pi / 3 // pointy top, like SF Symbols' hexagon
+            // CGFloat here resolves cos/sin ambiguously under the current SDK; compute in Double, widen.
+            let point = NSPoint(x: 9 + radius * CGFloat(cos(angle)), y: 9 + radius * CGFloat(sin(angle)))
             i == 0 ? hexagon.move(to: point) : hexagon.line(to: point)
         }
         hexagon.close()
@@ -595,7 +724,10 @@ struct Panel: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Keys").foregroundStyle(dim)
             ForEach(monitor.registered) { key in
-                keyRow(key.name, key.detail, present: monitor.isPresent(key), action: "Remove") { monitor.remove(key) }
+                keyRow(key.publicKey == nil ? key.name + " *" : key.name, key.detail, present: monitor.isPresent(key), action: "Remove") { monitor.remove(key) }
+            }
+            if monitor.registered.contains(where: { $0.publicKey == nil }) {
+                Text("* Recognized, not signature-checked").foregroundStyle(dim)
             }
             if !monitor.detected.isEmpty {
                 Text("Detected").foregroundStyle(dim).padding(.top, 6)
