@@ -15,6 +15,8 @@ struct RegisteredKey: Codable, Hashable, Identifiable {
     let name: String
     let handle: Data
     var added: Date? = nil
+    /// Credential public key (P-256, x9.63), captured at registration so identity can be checked, not just the handle.
+    var publicKey: Data? = nil
     var id: Data { handle }
     var model: String { String(format: "%04X:%04X", vendor, product) }
     /// Tells identical models apart in the list.
@@ -152,14 +154,15 @@ final class KeyMonitor: ObservableObject {
         registrationError = nil
         touchDeadline = Date().addingTimeInterval(30) // matches U2FDevice.register's wait
         u2fQueue.async {
-            let handle = U2FDevice.session(device.hid) { $0.register() }
+            let credential = U2FDevice.session(device.hid) { $0.register() }
             DispatchQueue.main.async {
                 self.touchDeadline = nil
-                guard let handle else { self.registrationError = "Registration failed, try again"; return }
-                self.registered.append(RegisteredKey(vendor: device.vendor, product: device.product, name: device.name, handle: handle, added: Date()))
+                guard let credential else { self.registrationError = "Registration failed, try again"; return }
+                self.registered.append(RegisteredKey(vendor: device.vendor, product: device.product, name: device.name,
+                                                    handle: credential.handle, added: Date(), publicKey: credential.publicKey))
                 self.note("Key registered")
                 self.save()
-                self.present[device.id]?.owner = handle
+                self.present[device.id]?.owner = credential.handle
                 self.update()
             }
         }
@@ -183,7 +186,7 @@ final class KeyMonitor: ObservableObject {
     private func verify(_ device: Device) {
         let candidates = registered.filter { $0.vendor == device.vendor && $0.product == device.product }
         u2fQueue.async {
-            let owner = candidates.isEmpty ? nil : U2FDevice.session(device.hid) { u2f in candidates.first { u2f.owns($0.handle) }?.handle }
+            let owner = candidates.isEmpty ? nil : U2FDevice.session(device.hid) { u2f in candidates.first { u2f.owns($0) }?.handle }
             DispatchQueue.main.async {
                 guard self.present[device.id] != nil else { return }
                 self.present[device.id]?.checked = true
@@ -308,8 +311,9 @@ final class U2FDevice {
         return u2f.openChannel() ? body(u2f) : nil
     }
 
-    /// Creates a credential and returns its key handle once the key has been touched (up to 30s).
-    func register() -> Data? {
+    /// Creates a credential once the key has been touched (up to 30s). Returns the handle and the credential
+    /// public key so later checks can be cryptographic rather than a bare "I know this handle".
+    func register() -> (handle: Data, publicKey: Data)? {
         let challenge = (0..<32).map { _ in UInt8.random(in: 0...255) }
         let deadline = Date().addingTimeInterval(30)
         let registerCommand = { self.apdu(0x01, 0x00, challenge + self.appID) }
@@ -321,25 +325,42 @@ final class U2FDevice {
         }
         // Response: 0x05 | public key (65) | handle length | handle | ...
         guard response.sw == 0x9000, response.data.count > 67 else { return nil }
+        let publicKey = Data(response.data[1..<66])
         let length = Int(response.data[66])
         guard response.data.count >= 67 + length else { return nil }
         let handle = Data(response.data[67..<(67 + length)])
 
         // Some keys (the Feitian ePass) register without a touch but always want one to sign, so make them sign once.
-        guard !touched else { return handle }
+        guard !touched else { return (handle, publicKey) }
         let signCommand = { self.apdu(0x02, 0x03, challenge + self.appID + [UInt8(length)] + [UInt8](handle)) }
         var signed = signCommand()
         while signed.sw == 0x6985 && Date() < deadline {
             CFRunLoopRunInMode(.defaultMode, 0.3, true)
             signed = signCommand()
         }
-        return signed.sw == 0x9000 ? handle : nil
+        return signed.sw == 0x9000 ? (handle, publicKey) : nil
     }
 
-    /// Check-only authenticate: the key answers 0x6985 only for handles it created itself.
-    func owns(_ handle: Data) -> Bool {
+    /// Does this physical key hold `key`? Recognition is a check-only authenticate: a key answers 0x6985 (touch
+    /// required) only for a handle it created, and an error for a foreign one. When registration stored a public
+    /// key, also ask for a silent signed assertion and verify it, so a device that merely echoes 0x6985 is not
+    /// enough. Keys that insist on a touch even there fall back to recognition (the previous behaviour).
+    func owns(_ key: RegisteredKey) -> Bool {
+        let handle = [UInt8](key.handle)
         let challenge = [UInt8](repeating: 0, count: 32)
-        return apdu(0x02, 0x07, challenge + appID + [UInt8(handle.count)] + [UInt8](handle)).sw == 0x6985
+        let body = challenge + appID + [UInt8(handle.count)] + handle
+        guard apdu(0x02, 0x07, body).sw == 0x6985 else { return false }
+        guard let publicKey = key.publicKey else { return true }
+
+        let reply = apdu(0x02, 0x08, body) // 0x08 = don't enforce user presence, sign
+        guard reply.sw == 0x9000, reply.data.count > 5, reply.data[0] == 0x01,
+              let pub = try? P256.Signing.PublicKey(x963Representation: publicKey),
+              let signature = try? P256.Signing.ECDSASignature(derRepresentation: Data(reply.data[5...])) else {
+            return true // the key can't prove itself silently; trust recognition
+        }
+        let counter = Data(reply.data[1..<5])
+        let message = Data(appID + [0x01] + counter + challenge)
+        return pub.isValidSignature(signature, for: message)
     }
 
     private func openChannel() -> Bool {
