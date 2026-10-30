@@ -43,6 +43,10 @@ Click the icon to open the panel.
 The key moves to **Keys**, with the date it was added. From now on Keeper recognises that exact key every time it is
 inserted, without a touch. Another key of the same model will not pass.
 
+Most keys prove this with a signature on every insertion. Keys that only sign with a touch can't, so Keeper recognises
+them without one and marks them `*`. A key registered before signature checks existed is marked too; register it again
+to upgrade it.
+
 Register a second key as a backup the same way. Any registered key is enough to keep the Mac open.
 
 ## Arm
@@ -63,8 +67,9 @@ under **On key loss**:
 | **Logout** | You are logged out. Open apps quit. |
 | **Halt** | The Mac shuts down. |
 
-Logout and Halt ask apps to quit, just like the Apple menu does. An app with unsaved work can stop them, and you will
-lose any unsaved work. Lock cannot be stopped and loses nothing.
+Logout and Halt lock the screen first, then ask apps to quit, just like the Apple menu does. An app with unsaved work
+can stop them, which leaves the Mac locked; if Keeper is still running 30 seconds later it records an incident. If
+they go through, you will lose any unsaved work. Lock cannot be stopped and loses nothing.
 
 ## Coming back
 
@@ -95,7 +100,7 @@ Keeper sends no notifications. Everything is in the panel.
 | Quit while armed | Same reason. Quitting while disarmed is free. |
 | Clear incidents | So the record of an attempt can't be wiped. |
 
-Arming never needs the password.
+Arming never needs the password, and neither does logging out, restarting or shutting down.
 
 ## If something goes wrong
 
@@ -107,6 +112,9 @@ lost key from **Keys** and register a new one.
 **A key shows □ in Keys.** That key is registered but not plugged in.
 
 **Registration failed.** The key wasn't touched within 30 seconds. Click Register again.
+
+**Your registered key appears under Detected.** It didn't pass its check, so Keeper is treating it as unknown. Remove
+it from **Keys** and register it again. If that keeps happening, or it isn't your key, treat it as an incident.
 
 ## Uninstall
 
@@ -120,5 +128,6 @@ lost key from **Keys** and register a new one.
 - Locking uses a private macOS function. A future macOS could change it.
 - Registered keys and incidents are stored in user preferences. The administrator password is enforced by Keeper,
   not by the system, so someone with access to your unlocked account and a terminal could edit them.
-- Force-quitting Keeper with Activity Monitor bypasses the Quit password.
+- Force-quitting Keeper with Activity Monitor or `kill -9` bypasses the Quit password. Other `kill` signals ask for it.
+- If you start a log out and an app then stops it, Keeper has already quit. Open it again and re-arm.
 - macOS only reports successful unlocks, so wrong passwords at the lock screen are not recorded.

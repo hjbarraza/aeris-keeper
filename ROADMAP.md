@@ -23,14 +23,16 @@ users to insert the key first. No grace window.
 
 **Protection gaps**
 
-1. **Action failed** — Logout/Halt can be blocked by an app with unsaved work, leaving the Mac open while the owner
-   believes it's locked. Detect (session still active N seconds later), fall back to Lock, record an incident.
-2. **Keeper killed while armed** — Quit asks for the admin password, but `kill` or Activity Monitor doesn't.
-   Run under a LaunchAgent with `KeepAlive`, and on launch record "Stopped unexpectedly while armed".
+1. **Action failed** — Logout/Halt lock first, so an app with unsaved work can't leave the Mac open, and Keeper records
+   an incident if it's still running 30s later. If macOS quit Keeper before the app refused, nothing is recorded.
+2. **Keeper killed while armed** — Quit and catchable `kill` signals ask for the admin password, but SIGKILL (Force
+   Quit) and SIGSTOP can't be caught. Run under a LaunchAgent with `KeepAlive`, and on launch record "Stopped
+   unexpectedly while armed".
 3. **Tamper-proof storage** — registered keys and incidents live in user defaults, editable without admin.
    Move them behind a privileged helper (root-owned file), so the admin gate is real.
-4. **Verify signatures** — identity relies on the key's "this handle is mine" answer; a purpose-built fake device
-   could lie. Store the public key at registration and occasionally verify a signed challenge (needs a touch).
+4. **Verify signatures** — keys that sign without a touch prove a fresh challenge on every insertion. Keys that only
+   sign with a touch still rely on "this handle is mine", which a purpose-built fake device could lie about, and so do
+   keys registered before this check. Occasionally ask those for a signed challenge (needs a touch).
 5. **Failed password attempts** — macOS only announces successful unlocks, so wrong passwords at the lock screen
    leave no trace in Keeper. Read failed authentications from the unified log and record them as incidents.
 
@@ -55,6 +57,6 @@ users to insert the key first. No grace window.
 
 13. **Tests** — the state machine (blip filter, re-lock, arm/disarm rules) and CTAPHID framing are untested.
     Extract them from the UI so they can run headless.
-14. **Split `Keeper.swift`** (~700 lines) into monitor, U2F, and UI files once tests exist.
+14. **Split `Keeper.swift`** (~800 lines) into monitor, U2F, and UI files once tests exist.
 15. **Fixtures for UI review** — the off-screen panel renderer used during design should live in the repo so every
     state can be re-rendered on each change.
