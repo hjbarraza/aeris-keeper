@@ -94,7 +94,11 @@ final class KeyMonitor: ObservableObject {
     var awaitingTouch: Bool { touchDeadline != nil }
     @Published private(set) var registered: [RegisteredKey] = []
     @Published private var present: [UInt64: Device] = [:]
-    @AppStorage("action") var action = RemovalAction.lock.rawValue
+    /// On-key-loss choice. Backed by UserDefaults by hand: @AppStorage inside an ObservableObject doesn't emit
+    /// objectWillChange, so the panel's highlight went stale. didSet republishes and persists.
+    @Published var action = UserDefaults.standard.string(forKey: "action") ?? RemovalAction.lock.rawValue {
+        didSet { UserDefaults.standard.set(action, forKey: "action") }
+    }
 
     private var port: IONotificationPortRef?
     private var addedIter: io_iterator_t = 0
@@ -174,7 +178,10 @@ final class KeyMonitor: ObservableObject {
         save()
         note("Key unregistered")
         for (id, device) in present where device.owner == key.handle { present[id]?.owner = nil }
-        if !connected { armed = false } // otherwise the next unlock would re-lock with no way to satisfy it
+        if !connected, armed {
+            armed = false // otherwise the next unlock would re-lock with no way to satisfy it
+            note("Disarmed, key unregistered")
+        }
         update()
     }
 
