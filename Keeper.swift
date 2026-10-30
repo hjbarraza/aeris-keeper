@@ -380,6 +380,11 @@ final class U2FDevice {
     }
 }
 
+/// With auto-login, a restart lands in the account with no password, and Keeper starts disarmed.
+func autoLoginEnabled() -> Bool {
+    NSDictionary(contentsOfFile: "/Library/Preferences/com.apple.loginwindow.plist")?["autoLoginUser"] != nil
+}
+
 func lockScreen() {
     let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_NOW)
     guard let sym = dlsym(handle, "SACLockScreenImmediate") else { return }
@@ -532,32 +537,37 @@ struct Panel: View {
 
     @ViewBuilder private var console: some View {
         // Status and the action that changes it, side by side.
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    keeperIcon(monitor.armed ? .armed : .disarmed)
-                        .renderingMode(.template)
-                        .resizable()
-                        .frame(width: 16, height: 16)
-                    Text(monitor.armed ? "Armed" : "Disarmed").font(.custom("IBMPlexMono-Medm", size: 14))
-                    Text(monitor.connected ? "· key present" : "· key missing").foregroundStyle(monitor.connected ? dim : .red)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        keeperIcon(monitor.armed ? .armed : .disarmed)
+                            .renderingMode(.template)
+                            .resizable()
+                            .frame(width: 16, height: 16)
+                        Text(monitor.armed ? "Armed" : "Disarmed").font(.custom("IBMPlexMono-Medm", size: 14))
+                        Text(monitor.connected ? "· key present" : "· key missing").foregroundStyle(monitor.connected ? dim : .red)
+                    }
+                    .foregroundStyle(monitor.armed ? .green : .white)
+                    // Arming without a registered key would lock you out on next unlock.
+                    if !monitor.armed && !monitor.connected {
+                        Text("Insert a registered key to arm").foregroundStyle(dim)
+                    }
                 }
-                .foregroundStyle(monitor.armed ? .green : .white)
-                // Arming without a registered key would lock you out on next unlock.
-                if !monitor.armed && !monitor.connected {
-                    Text("Insert a registered key to arm").foregroundStyle(dim)
+                Spacer()
+                if monitor.armed || monitor.connected {
+                    Button { monitor.setArmed(!monitor.armed) } label: {
+                        Text(monitor.armed ? "Disarm" : "Arm")
+                            .font(.custom("IBMPlexMono-Medm", size: 11))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.35)))
+                            .contentShape(Rectangle())
+                    }
                 }
             }
-            Spacer()
-            if monitor.armed || monitor.connected {
-                Button { monitor.setArmed(!monitor.armed) } label: {
-                    Text(monitor.armed ? "Disarm" : "Arm")
-                        .font(.custom("IBMPlexMono-Medm", size: 11))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 6)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.35)))
-                        .contentShape(Rectangle())
-                }
+            if autoLoginEnabled() {
+                Text("Auto-login is on: a restart bypasses Keeper").foregroundStyle(.red)
             }
         }
         .padding(12)

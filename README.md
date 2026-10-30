@@ -23,7 +23,8 @@ protection and does not encrypt anything.
 
 Restarting the Mac ends the session, and Keeper starts disarmed — leaving only your login password. Someone who knows
 that password can get in by restarting, but your session, open apps and unsaved work are gone when they do. They can
-no longer slip into your open session unnoticed.
+no longer slip into your open session unnoticed. With auto-login on, a restart needs no password at all; Keeper
+warns you in its panel. Turning on FileVault switches auto-login off.
 
 Your login password and FileVault are your choice; Keeper doesn't change them, and works best with both. For a key
 that is required at login itself, use macOS smart card login with a PIV-capable key — or
