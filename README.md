@@ -16,6 +16,18 @@ logs out, or shuts down — your choice. Unlock without the key and it locks aga
 
 Disarming, quitting while armed, changing keys and clearing incidents require the administrator password.
 
+## What it protects
+
+Keeper protects a session that is already open, while you are away from it. It is not login protection and does not
+encrypt anything.
+
+Restarting the Mac ends the session, and Keeper starts disarmed — leaving only your login password. Someone who knows
+that password can get in by restarting, but your session, open apps and unsaved work are gone when they do. They can
+no longer slip into your open session unnoticed.
+
+Your login password and FileVault are your choice; Keeper doesn't change them, and works best with both. For a key
+that is required at login itself, use macOS smart card login with a PIV-capable key.
+
 ## Install
 
 Download `Aeris-Keeper.zip` from [Releases](https://github.com/hjbarraza/aeris-keeper/releases/latest), unzip it, and move **Aeris Keeper** to Applications.
@@ -80,6 +92,7 @@ and always starts disarmed. Tested on macOS 27.
 - Wrong passwords at the lock screen recorded as incidents
 - A logout or shut down that doesn't happen falls back to lock
 - Keeper restarts itself if force-quit while armed
+- A restart while armed is recorded as an incident
 
 **Later**
 

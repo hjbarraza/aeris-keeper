@@ -34,21 +34,27 @@ users to insert the key first. No grace window.
 5. **Failed password attempts** — macOS only announces successful unlocks, so wrong passwords at the lock screen
    leave no trace in Keeper. Read failed authentications from the unified log and record them as incidents.
 
+6. **Restarted while armed** — remember that Keeper was armed; if the next launch follows a restart instead of a
+   disarm, record an incident, so a restart used to get past Keeper leaves a trace.
+7. **Stay armed across restarts (opt-in)** — start armed after login and re-lock until a registered key is present.
+   Recovery for a lost key becomes Safe Mode (login items don't run), which an attacker with the password can use
+   too: it adds friction, not a guarantee. Key-at-login proper needs macOS smart card login.
+
 **UX**
 
-6. **Auto-arm (opt-in)** — Keeper starts disarmed every login, so protection depends on remembering. Offer
+8. **Auto-arm (opt-in)** — Keeper starts disarmed every login, so protection depends on remembering. Offer
    "Arm when a registered key is inserted".
-7. **Key nicknames** — "Keychain", "Backup" instead of model + date once there are several identical keys.
-8. **Registration feedback** — the admin prompt closes the panel; success is only visible by reopening it.
+9. **Key nicknames** — "Keychain", "Backup" instead of model + date once there are several identical keys.
+10. **Registration feedback** — the admin prompt closes the panel; success is only visible by reopening it.
    Reopen the panel on success (Keeper deliberately sends no macOS notifications).
-9. **Accessibility** — VoiceOver labels for the menu bar glyphs and status line; full keyboard navigation in the
+11. **Accessibility** — VoiceOver labels for the menu bar glyphs and status line; full keyboard navigation in the
    panel (no global shortcuts).
-10. **Export incidents** — copy or save the incident history for a report.
+12. **Export incidents** — copy or save the incident history for a report.
 
 **Engineering**
 
-11. **Tests** — the state machine (blip filter, re-lock, arm/disarm rules) and CTAPHID framing are untested.
+13. **Tests** — the state machine (blip filter, re-lock, arm/disarm rules) and CTAPHID framing are untested.
     Extract them from the UI so they can run headless.
-12. **Split `Keeper.swift`** (~700 lines) into monitor, U2F, and UI files once tests exist.
-13. **Fixtures for UI review** — the off-screen panel renderer used during design should live in the repo so every
+14. **Split `Keeper.swift`** (~700 lines) into monitor, U2F, and UI files once tests exist.
+15. **Fixtures for UI review** — the off-screen panel renderer used during design should live in the repo so every
     state can be re-rendered on each change.
