@@ -6,6 +6,12 @@
 
 <p align="center"><img src="docs/panel.png" width="320" alt="The Aeris Keeper panel, armed"></p>
 
+<p align="center">
+  <a href="https://youtu.be/xgAPX1K-7IA">
+    <img src="docs/demo.jpg" width="560" alt="Watch Aeris Keeper in action">
+  </a>
+</p>
+
 ## How it works
 
 Register any FIDO security key. One touch at registration; after that, Keeper verifies it silently each time it is
