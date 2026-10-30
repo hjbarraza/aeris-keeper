@@ -346,7 +346,11 @@ final class U2FDevice {
 
     private func apdu(_ ins: UInt8, _ p1: UInt8, _ body: [UInt8]) -> (sw: UInt16, data: [UInt8]) {
         send(0x83, [0x00, ins, p1, 0x00, 0x00, UInt8(body.count >> 8), UInt8(body.count & 0xFF)] + body + [0x00, 0x00])
-        guard let reply = receive(), reply.data.count >= 2 else { return (0, []) }
+        // Ignore anything that isn't a MSG reply: keys send CTAPHID KEEPALIVE (0xBB) while they wait for a touch,
+        // and treating that 1-byte packet as the answer made the touch loop bail out and registration fail.
+        var reply: (cmd: UInt8, data: [UInt8])?
+        while let next = receive() { if next.cmd == 0x83, next.data.count >= 2 { reply = next; break } }
+        guard let reply else { return (0, []) }
         let sw = UInt16(reply.data[reply.data.count - 2]) << 8 | UInt16(reply.data[reply.data.count - 1])
         return (sw, Array(reply.data.dropLast(2)))
     }
@@ -375,7 +379,10 @@ final class U2FDevice {
         guard let first = next(), first.count >= 7 else { return nil }
         let total = Int(first[5]) << 8 | Int(first[6])
         var data = Array(first[7...].prefix(total))
-        while data.count < total, let more = next() { data += more[5...].prefix(total - data.count) }
+        while data.count < total, let more = next() {
+            guard more.count >= 5 else { continue } // a short report would trap on more[5...] below
+            data += more[5...].prefix(total - data.count)
+        }
         return (first[4], data)
     }
 }
