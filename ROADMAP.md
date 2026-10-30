@@ -3,25 +3,21 @@
 Status as of 30 Oct 2026. v1.0 locks, logs out or halts the Mac when a registered FIDO security key is removed,
 re-locks if someone unlocks without one, and records incidents.
 
-## Before v1.0 ships
+## Still to verify from 1.0
 
-**Must**
+- Logout and Halt with unsaved work open.
+- The 1.5s blip filter with a real unplug, and sleep/wake through a USB hub.
+- First launch from a browser download on a fresh Mac, and on macOS 13 and Intel.
 
-- **Owner gets flagged as an intruder.** Unlocking with the password *before* inserting the key re-locks the Mac
-  and logs "Re-locked, no key" against the owner. Either teach the order (lock screen hint isn't possible, so the
-  panel and README must say "insert key, then unlock") or give a short grace window after unlock for the key to
-  appear before re-locking. The grace window weakens protection by the same few seconds; decide which.
-- **Live-test what screenshots can't show:** Logout and Halt with unsaved work open, the 1.5s blip filter with a
-  real unplug, sleep/wake through a USB hub. (Lock on removal and re-lock without a key: verified live 30 Oct.)
-- **Repository:** `LICENSE` and `README.md`.
+Verified live: lock on removal, re-lock without a key, back in with the key, incidents saved.
 
-Done: bundle ID `com.aeris.keeper` with the U2F app ID fixed independently (`aeris-keeper`); app icon
-(`Icon/make-icon.swift` → `Icon/AppIcon-1024.png`, packaged by `build.sh`).
+Decided: unlocking is strict. Inserting the key after unlocking re-locks and records an incident; the README tells
+users to insert the key first. No grace window.
 
-**Should**
+## Distribution
 
-- **Distribution signing.** Ad-hoc signing only runs on this Mac. Anyone else needs a Developer ID–signed,
-  notarized build, or they hit Gatekeeper.
+- **Notarization.** Requires the paid Apple Developer Program: a Developer ID certificate, hardened runtime with the
+  Apple Events entitlement (logout and shut down), then notarize and staple. Removes the first-launch step.
 
 ## Next cycles
 

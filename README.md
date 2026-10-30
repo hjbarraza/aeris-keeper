@@ -61,6 +61,24 @@ and always starts disarmed. Tested on macOS 27.
 - Keys and incidents are stored in user preferences. The administrator password is enforced by Keeper, not by the system.
 - Log out and shut down can be stopped by apps with unsaved work. Lock cannot.
 
+## Roadmap
+
+**Next**
+
+- Notarized build — opens with a double-click
+- Wrong passwords at the lock screen recorded as incidents
+- A logout or shut down that doesn't happen falls back to lock
+- Keeper restarts itself if force-quit while armed
+
+**Later**
+
+- Keys and incidents in storage only an administrator can change
+- Signed challenges, so a key proves itself cryptographically
+- Optional: arm automatically when a registered key is inserted
+- Key nicknames · VoiceOver · incident export
+
+The detail lives in [ROADMAP.md](ROADMAP.md).
+
 ## License
 
 MIT. IBM Plex Mono is licensed under the SIL Open Font License 1.1.
