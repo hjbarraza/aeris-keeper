@@ -63,12 +63,12 @@ enum RemovalAction: String, CaseIterable, Identifiable {
         }
     }
 
-    /// For the log: "Key removed, locked".
-    var past: String {
+    /// For the log: "Key removed, locked". Log out and shut down are only requests, so they don't claim to be done.
+    var status: String {
         switch self {
         case .lock: "locked"
-        case .logOut: "logged out"
-        case .shutDown: "halted"
+        case .logOut: "logging out"
+        case .shutDown: "shutting down"
         }
     }
 
@@ -84,7 +84,8 @@ enum RemovalAction: String, CaseIterable, Identifiable {
 final class KeyMonitor: ObservableObject {
     static let shared = KeyMonitor()
     @Published var armed = false // always starts unarmed
-    /// Set while a log out / shut down we triggered is in progress, so the system quitting us doesn't re-prompt.
+    /// Set while a log out / shut down we asked for is underway, so it can't stall on our own password prompt.
+    /// Cleared if it hasn't happened after 30s, so a refused one doesn't leave quitting free.
     var systemActionInFlight = false
     @Published private(set) var log: [LogEntry] = [] // newest first
     /// Times protection was tested. Kept on disk and only cleared with the admin password, so an intruder can't wipe them.
@@ -245,9 +246,7 @@ final class KeyMonitor: ObservableObject {
             guard let self, !self.connected else { return }
             self.pendingLoss = nil
             guard self.armed else { self.note("Key removed"); return }
-            let response = RemovalAction(rawValue: self.action) ?? .lock
-            self.note("Key removed, " + response.past)
-            self.perform(response)
+            self.perform(RemovalAction(rawValue: self.action) ?? .lock)
         }
         pendingLoss = loss
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: loss)
@@ -273,16 +272,26 @@ final class KeyMonitor: ObservableObject {
         log = Array(([LogEntry(date: Date(), text: event)] + log).prefix(5))
     }
 
+    /// Locks first whatever the choice: log out and shut down can be refused, and the Mac mustn't be left open if they are.
     private func perform(_ action: RemovalAction) {
+        let locked = lockScreen()
+        if !locked { incident("Lock failed") }
+        note("Key removed, " + (locked ? action.status : "lock failed"))
         switch action {
-        case .lock:
-            if !lockScreen() { incident("Lock failed") }
-        case .logOut:
-            systemActionInFlight = true // the system will quit us; don't make it ask for the password again
-            if !sendToLoginWindow("rlgo") { systemActionInFlight = false; incident("Log out failed") } // kAEReallyLogOut
-        case .shutDown:
-            systemActionInFlight = true
-            if !sendToLoginWindow("shut") { systemActionInFlight = false; incident("Shut down failed") } // kAEShutDown
+        case .lock: break
+        case .logOut: endSession("rlgo", failure: "Log out failed") // kAEReallyLogOut
+        case .shutDown: endSession("shut", failure: "Shut down failed") // kAEShutDown
+        }
+    }
+
+    /// Asks loginwindow to end the session. An app with unsaved work can refuse after the request has gone out, so
+    /// still being here 30s later is what says it failed.
+    private func endSession(_ code: String, failure: String) {
+        systemActionInFlight = true
+        guard sendToLoginWindow(code) else { systemActionInFlight = false; incident(failure); return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            self?.systemActionInFlight = false
+            self?.incident(failure)
         }
     }
 }
@@ -455,7 +464,6 @@ func autoLoginEnabled() -> Bool {
 
 /// Locks the screen via a private login.framework symbol. Returns false when the symbol is missing or the call
 /// fails, so callers record it rather than claiming the Mac is locked.
-@discardableResult
 func lockScreen() -> Bool {
     guard let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_NOW),
           let sym = dlsym(handle, "SACLockScreenImmediate") else { return false }
@@ -477,23 +485,59 @@ func adminAuthorized() -> Bool {
     }
 }
 
-@discardableResult
+func fourCC(_ s: String) -> UInt32 { s.utf8.reduce(0) { $0 << 8 | UInt32($1) } }
+
+/// True once the request is sent, which is not the same as it being carried out.
 func sendToLoginWindow(_ code: String) -> Bool {
-    func fourCC(_ s: String) -> UInt32 { s.utf8.reduce(0) { $0 << 8 | UInt32($1) } }
     let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.loginwindow")
     let event = NSAppleEventDescriptor(eventClass: fourCC("aevt"), eventID: fourCC(code), targetDescriptor: target,
                                        returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
     do { try event.sendEvent(options: [.noReply], timeout: 10); return true } catch { return false }
 }
 
-/// Gates every way the app can quit. The panel button, ⌘Q, the Quit AppleEvent and `killall`/SIGTERM all reach
-/// applicationShouldTerminate, so the admin password is required however the quit started. Force Quit (SIGKILL)
-/// still bypasses — see ROADMAP.
+/// Gates the ways Keeper gets asked to quit. The panel button, ⌘Q, the Quit AppleEvent and catchable signals (so
+/// `kill` and `killall`) all reach applicationShouldTerminate, so the admin password is required however the quit
+/// started. Force Quit (SIGKILL) can't be caught and still bypasses it — see ROADMAP.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var signalSources: [DispatchSourceSignal] = []
+    private var authorizing = false
+    private var quitApproved = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Left alone, these end the process without ever reaching applicationShouldTerminate.
+        signalSources = [SIGTERM, SIGHUP, SIGINT, SIGQUIT].map { number in
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { NSApp.terminate(nil) }
+            source.resume()
+            return source
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let monitor = KeyMonitor.shared
-        guard monitor.armed, !monitor.systemActionInFlight else { return .terminateNow }
-        return adminAuthorized() ? .terminateNow : .terminateCancel
+        guard monitor.armed, !monitor.systemActionInFlight, !sessionEnding, !quitApproved else { return .terminateNow }
+        // Always refuse this quit and start a new one if the password is right. Not .terminateLater: that holds the app
+        // in a modal state, where a second quit ends it unasked and a quit from a dispatch block never gets its answer.
+        guard !authorizing else { return .terminateCancel }
+        authorizing = true
+        // Off the main thread: the call blocks while the prompt is open, and Keeper has to keep watching the key.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let allowed = adminAuthorized()
+            DispatchQueue.main.async {
+                self.authorizing = false
+                self.quitApproved = allowed
+                if allowed { NSApp.terminate(nil) }
+            }
+        }
+        return .terminateCancel
+    }
+
+    /// Is this quit part of a log out, restart or shut down? Those aren't attempts to drop the protection, and a password
+    /// prompt would hold them up. A process could forge the reason, but it could just as well send SIGKILL.
+    private var sessionEnding: Bool {
+        let reason = NSAppleEventManager.shared().currentAppleEvent?.attributeDescriptor(forKeyword: fourCC("why?"))?.enumCodeValue
+        return ["logo", "rlgo", "rrst", "rest", "rsdn", "shut"].map(fourCC).contains { $0 == reason }
     }
 }
 
