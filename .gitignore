@@ -1,0 +1,5 @@
+# Build output
+/Aeris Keeper.app
+
+# macOS
+.DS_Store
