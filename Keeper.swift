@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import IOKit
 import ServiceManagement
 import IOKit.hid
@@ -78,6 +79,7 @@ enum RemovalAction: String, CaseIterable, Identifiable {
 }
 
 final class KeyMonitor: ObservableObject {
+    static let shared = KeyMonitor()
     @Published var armed = false // always starts unarmed
     /// Set while a log out / shut down we triggered is in progress, so the system quitting us doesn't re-prompt.
     var systemActionInFlight = false
@@ -141,11 +143,9 @@ final class KeyMonitor: ObservableObject {
         note(on ? "Armed" : "Disarmed")
     }
 
-    /// Quitting while armed would drop the protection, so it needs the admin password too.
-    func quit() {
-        guard !armed || adminAuthorized() else { return }
-        NSApp.terminate(nil)
-    }
+    /// Quitting while armed would drop the protection, so it needs the admin password. The check itself lives in
+    /// AppDelegate.applicationShouldTerminate, so every termination path is gated, not just this button.
+    func quit() { NSApp.terminate(nil) }
 
     func register(_ device: Device) {
         guard adminAuthorized() else { return }
@@ -431,9 +431,21 @@ func sendToLoginWindow(_ code: String) -> Bool {
     do { try event.sendEvent(options: [.noReply], timeout: 10); return true } catch { return false }
 }
 
+/// Gates every way the app can quit. The panel button, ⌘Q, the Quit AppleEvent and `killall`/SIGTERM all reach
+/// applicationShouldTerminate, so the admin password is required however the quit started. Force Quit (SIGKILL)
+/// still bypasses — see ROADMAP.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let monitor = KeyMonitor.shared
+        guard monitor.armed, !monitor.systemActionInFlight else { return .terminateNow }
+        return adminAuthorized() ? .terminateNow : .terminateCancel
+    }
+}
+
 @main
 struct KeeperApp: App {
-    @StateObject private var monitor = KeyMonitor()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var monitor = KeyMonitor.shared
 
     var body: some Scene {
         MenuBarExtra {
