@@ -18,15 +18,17 @@ Disarming, quitting while armed, changing keys and clearing incidents require th
 
 ## What it protects
 
-Keeper protects a session that is already open, while you are away from it. It is not login protection and does not
-encrypt anything.
+Keeper is for being away from the desk, not a vault: it protects a session that is already open. It is not login
+protection and does not encrypt anything.
 
 Restarting the Mac ends the session, and Keeper starts disarmed — leaving only your login password. Someone who knows
 that password can get in by restarting, but your session, open apps and unsaved work are gone when they do. They can
 no longer slip into your open session unnoticed.
 
 Your login password and FileVault are your choice; Keeper doesn't change them, and works best with both. For a key
-that is required at login itself, use macOS smart card login with a PIV-capable key.
+that is required at login itself, use macOS smart card login with a PIV-capable key — or
+[AerisOS](https://github.com/hjbarraza/aerisos), our Linux distribution, which can require password and key at the
+login and lock screens.
 
 ## Install
 
