@@ -20,8 +20,25 @@ Disarming, quitting while armed, changing keys and clearing incidents require th
 
 Download `Aeris-Keeper.zip` from [Releases](https://github.com/hjbarraza/aeris-keeper/releases/latest), unzip it, and move **Aeris Keeper** to Applications.
 
-Keeper is not notarized by Apple, so macOS stops it the first time. Open it once, then go to
-**System Settings → Privacy & Security** and choose **Open Anyway**. Afterwards it opens normally.
+Keeper is not notarized by Apple, so macOS stops it the first time. Allow it once, in any of these ways:
+
+**Open Anyway** — any macOS version. Open Keeper, dismiss the warning, then go to **System Settings → Privacy & Security**,
+scroll to Security and choose **Open Anyway**. Confirm with your password.
+
+**Right-click → Open** — macOS 13 and 14. Right-click Keeper in Applications, choose **Open**, then **Open** again.
+On macOS 15 and later this no longer works; use Open Anyway.
+
+**Remove the quarantine flag** — from Terminal:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Aeris Keeper.app"
+```
+
+**Allow apps from anywhere** — turns Gatekeeper off for every app, not just Keeper. Run
+`sudo spctl --master-disable`, then choose **Anywhere** under **System Settings → Privacy & Security → Allow
+applications from**. Undo with `sudo spctl --master-enable`.
+
+After the first launch Keeper opens normally.
 
 ## Use
 

@@ -16,7 +16,8 @@ your registered keys is plugged in.
 ## Install
 
 Download `Aeris-Keeper.zip` from [Releases](https://github.com/hjbarraza/aeris-keeper/releases/latest), unzip, and
-move **Aeris Keeper** to Applications. It isn't notarized, so allow it once in **System Settings → Privacy & Security**.
+move **Aeris Keeper** to Applications. It isn't notarized, so allow it once — the
+[README](../README.md#install) lists the ways.
 
 Keeper appears in the menu bar and adds itself to Login Items.
 
