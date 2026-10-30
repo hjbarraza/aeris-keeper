@@ -501,7 +501,7 @@ struct Panel: View {
             HStack {
                 Text("AERIS KEEPER").font(.custom("IBMPlexMono-Medm", size: 11)).foregroundStyle(dim)
                 Spacer()
-                Text("v1.0").foregroundStyle(dim)
+                Text("v" + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")).foregroundStyle(dim)
             }
             .padding(12)
             rule
