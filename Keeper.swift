@@ -15,7 +15,8 @@ struct RegisteredKey: Codable, Hashable, Identifiable {
     let name: String
     let handle: Data
     var added: Date? = nil
-    /// Credential public key (P-256, x9.63), captured at registration so identity can be checked, not just the handle.
+    /// Credential public key (P-256, x9.63). Kept only for keys that proved at registration they can sign without a
+    /// touch; those must prove it every time. Nil means recognition only.
     var publicKey: Data? = nil
     var id: Data { handle }
     var model: String { String(format: "%04X:%04X", vendor, product) }
@@ -318,12 +319,12 @@ final class U2FDevice {
         return u2f.openChannel() ? body(u2f) : nil
     }
 
-    /// Creates a credential once the key has been touched (up to 30s). Returns the handle and the credential
-    /// public key so later checks can be cryptographic rather than a bare "I know this handle".
-    func register() -> (handle: Data, publicKey: Data)? {
+    /// Creates a credential once the key has been touched (up to 30s). Returns the handle, plus the public key when the
+    /// key can sign without a touch, so later checks can be cryptographic rather than a bare "I know this handle".
+    func register() -> (handle: Data, publicKey: Data?)? {
         let challenge = (0..<32).map { _ in UInt8.random(in: 0...255) }
         let deadline = Date().addingTimeInterval(30)
-        let registerCommand = { self.apdu(0x01, 0x00, challenge + self.appID) }
+        let registerCommand = { self.apdu(0x01, 0x00, challenge + self.appID, until: deadline) }
         var response = registerCommand()
         let touched = response.sw == 0x6985 // most keys wait for a touch here
         while response.sw == 0x6985 && Date() < deadline {
@@ -338,36 +339,54 @@ final class U2FDevice {
         let handle = Data(response.data[67..<(67 + length)])
 
         // Some keys (the Feitian ePass) register without a touch but always want one to sign, so make them sign once.
-        guard !touched else { return (handle, publicKey) }
-        let signCommand = { self.apdu(0x02, 0x03, challenge + self.appID + [UInt8(length)] + [UInt8](handle)) }
-        var signed = signCommand()
-        while signed.sw == 0x6985 && Date() < deadline {
-            CFRunLoopRunInMode(.defaultMode, 0.3, true)
-            signed = signCommand()
+        if !touched {
+            let signCommand = { self.apdu(0x02, 0x03, challenge + self.appID + [UInt8(length)] + [UInt8](handle), until: deadline) }
+            var signed = signCommand()
+            while signed.sw == 0x6985 && Date() < deadline {
+                CFRunLoopRunInMode(.defaultMode, 0.3, true)
+                signed = signCommand()
+            }
+            guard signed.sw == 0x9000, verifies(signed.data, challenge, publicKey) else { return nil }
         }
-        return signed.sw == 0x9000 ? (handle, publicKey) : nil
+
+        switch silentProof([UInt8](handle), publicKey) {
+        case true?: return (handle, publicKey)
+        case nil: return (handle, nil) // only ever signs with a touch, so recognition is all there is
+        case false?: return nil // signed, but not with the key it just registered
+        }
     }
 
     /// Does this physical key hold `key`? Recognition is a check-only authenticate: a key answers 0x6985 (touch
-    /// required) only for a handle it created, and an error for a foreign one. When registration stored a public
-    /// key, also ask for a silent signed assertion and verify it, so a device that merely echoes 0x6985 is not
-    /// enough. Keys that insist on a touch even there fall back to recognition (the previous behaviour).
+    /// required) only for a handle it created, and an error for a foreign one. A key with a stored public key must
+    /// also sign a fresh challenge: it proved it can, so a refusal now means this isn't that key.
     func owns(_ key: RegisteredKey) -> Bool {
         let handle = [UInt8](key.handle)
-        let challenge = [UInt8](repeating: 0, count: 32)
-        let body = challenge + appID + [UInt8(handle.count)] + handle
+        let body = [UInt8](repeating: 0, count: 32) + appID + [UInt8(handle.count)] + handle
         guard apdu(0x02, 0x07, body).sw == 0x6985 else { return false }
         guard let publicKey = key.publicKey else { return true }
+        return silentProof(handle, publicKey) == true
+    }
 
-        let reply = apdu(0x02, 0x08, body) // 0x08 = don't enforce user presence, sign
-        guard reply.sw == 0x9000, reply.data.count > 5, reply.data[0] == 0x01,
-              let pub = try? P256.Signing.PublicKey(x963Representation: publicKey),
-              let signature = try? P256.Signing.ECDSASignature(derRepresentation: Data(reply.data[5...])) else {
-            return true // the key can't prove itself silently; trust recognition
+    /// Asks for a signature over a fresh challenge without a touch (0x08). Nil if the key didn't sign, otherwise whether
+    /// the signature checks out. Retries a dropped exchange: a browser using the key at the same moment makes it busy.
+    private func silentProof(_ handle: [UInt8], _ publicKey: Data) -> Bool? {
+        let challenge = (0..<32).map { _ in UInt8.random(in: 0...255) }
+        let body = challenge + appID + [UInt8(handle.count)] + handle
+        var reply = apdu(0x02, 0x08, body)
+        for _ in 0..<2 where reply.sw == 0 {
+            CFRunLoopRunInMode(.defaultMode, 0.3, true)
+            reply = apdu(0x02, 0x08, body)
         }
-        let counter = Data(reply.data[1..<5])
-        let message = Data(appID + [0x01] + counter + challenge)
-        return pub.isValidSignature(signature, for: message)
+        return reply.sw == 0x9000 ? verifies(reply.data, challenge, publicKey) : nil
+    }
+
+    /// Checks an authentication response: presence (1) | counter (4) | DER signature, made over
+    /// appID | presence | counter | challenge. Presence is signed as sent: it's 0 when no touch was asked for.
+    private func verifies(_ response: [UInt8], _ challenge: [UInt8], _ publicKey: Data) -> Bool {
+        guard response.count > 5,
+              let key = try? P256.Signing.PublicKey(x963Representation: publicKey),
+              let signature = try? P256.Signing.ECDSASignature(derRepresentation: Data(response[5...])) else { return false }
+        return key.isValidSignature(signature, for: Data(appID + Array(response[0..<5]) + challenge))
     }
 
     private func openChannel() -> Bool {
@@ -378,12 +397,16 @@ final class U2FDevice {
         return true
     }
 
-    private func apdu(_ ins: UInt8, _ p1: UInt8, _ body: [UInt8]) -> (sw: UInt16, data: [UInt8]) {
+    private func apdu(_ ins: UInt8, _ p1: UInt8, _ body: [UInt8], until deadline: Date = Date().addingTimeInterval(3)) -> (sw: UInt16, data: [UInt8]) {
+        inbox.removeAll() // a late answer to an earlier exchange isn't an answer to this one
         send(0x83, [0x00, ins, p1, 0x00, 0x00, UInt8(body.count >> 8), UInt8(body.count & 0xFF)] + body + [0x00, 0x00])
         // Ignore anything that isn't a MSG reply: keys send CTAPHID KEEPALIVE (0xBB) while they wait for a touch,
         // and treating that 1-byte packet as the answer made the touch loop bail out and registration fail.
+        // Keepalives can't extend the wait past `deadline`, or a device could hold the U2F queue forever.
         var reply: (cmd: UInt8, data: [UInt8])?
-        while let next = receive() { if next.cmd == 0x83, next.data.count >= 2 { reply = next; break } }
+        while Date() < deadline, let next = receive(), next.cmd != 0xBF { // 0xBF = CTAPHID ERROR, no answer is coming
+            if next.cmd == 0x83, next.data.count >= 2 { reply = next; break }
+        }
         guard let reply else { return (0, []) }
         let sw = UInt16(reply.data[reply.data.count - 2]) << 8 | UInt16(reply.data[reply.data.count - 1])
         return (sw, Array(reply.data.dropLast(2)))
@@ -407,8 +430,12 @@ final class U2FDevice {
     private func receive() -> (cmd: UInt8, data: [UInt8])? {
         let deadline = Date().addingTimeInterval(3)
         func next() -> [UInt8]? {
-            while inbox.isEmpty && Date() < deadline { CFRunLoopRunInMode(.defaultMode, 0.05, true) }
-            return inbox.isEmpty ? nil : inbox.removeFirst()
+            while Date() < deadline {
+                if inbox.isEmpty { CFRunLoopRunInMode(.defaultMode, 0.05, true); continue }
+                let report = inbox.removeFirst()
+                if report.starts(with: channel) { return report } // other apps' traffic on this key reaches us too
+            }
+            return nil
         }
         guard let first = next(), first.count >= 7 else { return nil }
         let total = Int(first[5]) << 8 | Int(first[6])
@@ -653,7 +680,10 @@ struct Panel: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Keys").foregroundStyle(dim)
             ForEach(monitor.registered) { key in
-                keyRow(key.name, key.detail, present: monitor.isPresent(key), action: "Remove") { monitor.remove(key) }
+                keyRow(key.publicKey == nil ? key.name + " *" : key.name, key.detail, present: monitor.isPresent(key), action: "Remove") { monitor.remove(key) }
+            }
+            if monitor.registered.contains(where: { $0.publicKey == nil }) {
+                Text("* Recognized, not signature-checked").foregroundStyle(dim)
             }
             if !monitor.detected.isEmpty {
                 Text("Detected").foregroundStyle(dim).padding(.top, 6)
