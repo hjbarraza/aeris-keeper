@@ -448,8 +448,9 @@ func keeperIcon(_ glyph: Glyph) -> Image {
         let radius = armed ? 8.3 : 7.6 // the outline's stroke adds 0.7 outside, so the solid one grows to match
         let hexagon = NSBezierPath()
         for i in 0..<6 {
-            let angle = CGFloat.pi / 2 + CGFloat(i) * .pi / 3 // pointy top, like SF Symbols' hexagon
-            let point = NSPoint(x: 9 + radius * cos(angle), y: 9 + radius * sin(angle))
+            let angle = Double.pi / 2 + Double(i) * .pi / 3 // pointy top, like SF Symbols' hexagon
+            // CGFloat here resolves cos/sin ambiguously under the current SDK; compute in Double, widen.
+            let point = NSPoint(x: 9 + radius * CGFloat(cos(angle)), y: 9 + radius * CGFloat(sin(angle)))
             i == 0 ? hexagon.move(to: point) : hexagon.line(to: point)
         }
         hexagon.close()
